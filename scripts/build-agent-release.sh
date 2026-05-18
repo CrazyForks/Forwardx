@@ -26,29 +26,19 @@ build_one() {
 build_one amd64 forwardx-agent-linux-amd64
 build_one arm64 forwardx-agent-linux-arm64
 
-if [ -n "${FORWARDX_FXP_RELEASE_DIR:-}" ]; then
-  for arch in amd64 arm64; do
-    src="$FORWARDX_FXP_RELEASE_DIR/forwardx-fxp-linux-$arch"
-    if [ -f "$src" ]; then
-      cp "$src" "$OUT_DIR/forwardx-fxp-linux-$arch"
-      chmod 0755 "$OUT_DIR/forwardx-fxp-linux-$arch"
-      echo "[agent] bundled closed runtime -> forwardx-fxp-linux-$arch"
-    fi
-  done
-else
-  echo "[agent] FORWARDX_FXP_RELEASE_DIR not set; custom tunnel runtime assets will not be bundled"
-fi
+build_fxp() {
+  local goarch="$1"
+  local out="$2"
+  echo "[fxp] building linux/$goarch -> $out"
+  (
+    cd "$ROOT_DIR/forwardx-fxp"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$goarch" \
+      go build -trimpath -ldflags "-s -w" -o "$OUT_DIR/$out" .
+  )
+}
 
-for arch in amd64 arm64; do
-  var="FORWARDX_FXP_${arch^^}_B64"
-  b64="${!var:-}"
-  if [ -n "$b64" ]; then
-    out="$OUT_DIR/forwardx-fxp-linux-$arch"
-    printf '%s' "$b64" | base64 -d > "$out"
-    chmod 0755 "$out"
-    echo "[agent] bundled closed runtime from secret -> forwardx-fxp-linux-$arch"
-  fi
-done
+build_fxp amd64 forwardx-fxp-linux-amd64
+build_fxp arm64 forwardx-fxp-linux-arm64
 
 artifacts=("$OUT_DIR"/forwardx-agent-linux-*)
 if compgen -G "$OUT_DIR/forwardx-fxp-linux-*" >/dev/null; then

@@ -143,7 +143,7 @@ export const billingRouter = router({
 
   createDiscountCode: adminProcedure
     .input(z.object({
-      code: z.string().trim().min(1).max(64),
+      code: z.string().trim().max(64).optional(),
       discountType: z.enum(["percent", "amount"]),
       discountValue: z.number().int().min(1).max(100_000_000),
       maxUses: z.number().int().min(0).max(1_000_000).default(0),
@@ -154,7 +154,7 @@ export const billingRouter = router({
     .mutation(async ({ input, ctx }) => {
       if (input.discountType === "percent" && input.discountValue > 100) throw new Error("百分比折扣不能超过 100");
       return db.createDiscountCode({
-        code: input.code,
+        code: input.code || undefined,
         discountType: input.discountType,
         discountValue: input.discountValue,
         maxUses: input.maxUses,

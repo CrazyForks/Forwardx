@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.45] - 2026-05-19
+
+### Added
+
+- Open-sourced and added Linux release builds for the ForwardX encrypted tunnel runtime.
+- Added random 6-10 character code generation for redemption codes and discount codes.
+
+### Changed
+
+- User balance recharge is now kept in User Management; the balance page focuses on ledgers and marketing codes.
+- Redemption and discount creation forms now validate required fields before submitting, avoiding raw API error JSON in the UI.
+- Agent release publishing now fails if any required Agent or ForwardX tunnel runtime asset is missing.
+- Bumped panel and Agent target versions to 2.2.45.
+
 ## [2.2.44] - 2026-05-19
 
 ### Changed

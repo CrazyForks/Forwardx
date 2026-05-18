@@ -49,3 +49,5 @@ docker/Forwardx/
 agent/agent/
 agent/forwardx-agent-*
 agent/*.exe
+forwardx-fxp/dist/
+forwardx-fxp/forwardx-fxp*

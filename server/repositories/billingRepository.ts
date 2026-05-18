@@ -32,8 +32,15 @@ function normalizeCode(code: string) {
   return code.trim().toUpperCase();
 }
 
-export function generateBillingCode(prefix: string) {
-  return `${prefix}${crypto.randomBytes(5).toString("hex")}`.toUpperCase();
+export function generateBillingCode(prefix = "") {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const raw = crypto.randomBytes(10);
+  const bodyLength = Math.max(6, 10 - prefix.length);
+  let body = "";
+  for (let i = 0; i < bodyLength; i++) {
+    body += chars[raw[i] % chars.length];
+  }
+  return `${prefix}${body}`.slice(0, 10).toUpperCase();
 }
 
 export async function getPaymentOrderByOutTradeNo(outTradeNo: string) {
