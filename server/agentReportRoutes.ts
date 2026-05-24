@@ -93,7 +93,7 @@ agentRouter.post("/api/agent/traffic", async (req: Request, res: Response) => {
       const user = await db.getUserById(userId);
       if (user) {
         // 流量超额：自动禁用该用户所有规则
-        if (user.trafficLimit > 0 && (user.trafficUsed + totalBytes) >= user.trafficLimit) {
+        if (user.trafficLimit > 0 && user.trafficUsed >= user.trafficLimit) {
           console.log(`[Traffic] User ${user.id} traffic exceeded limit, disabling rules`);
           await db.disableAllUserRules(user.id);
         }

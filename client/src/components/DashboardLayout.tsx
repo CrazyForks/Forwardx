@@ -627,16 +627,16 @@ function DashboardLayoutContent({
               rel="noopener noreferrer"
               className="transition-colors hover:text-foreground"
             >
-              开源项目
+              项目地址
             </a>
-            <span className="text-muted-foreground/45">/</span>
+            <span className="text-muted-foreground/45">|</span>
             <a
               href={publicInfo?.telegramBotUrl || "https://t.me/miyin_private_bot"}
               target="_blank"
               rel="noopener noreferrer"
               className="transition-colors hover:text-foreground"
             >
-              作者 TG 双向聊天机器人
+              联系TG
             </a>
           </div>
         </footer>

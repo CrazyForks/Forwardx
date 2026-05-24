@@ -16,9 +16,12 @@ interface CaptchaEntry {
 
 const captchaStore = new Map<string, CaptchaEntry>();
 const loginFailStore = new Map<string, { count: number; lastFailAt: number }>();
-const emailCodeStore = new Map<string, { code: string; expiresAt: number }>();
+const emailCodeStore = new Map<string, { code: string; expiresAt: number; lastSentAt: number; attempts: number }>();
 const LOGIN_FAIL_THRESHOLD = 1;
 const LOGIN_FAIL_WINDOW_MS = 30 * 60 * 1000;
+const EMAIL_CODE_TTL_MS = 5 * 60 * 1000;
+const EMAIL_CODE_COOLDOWN_MS = 60 * 1000;
+const EMAIL_CODE_MAX_ATTEMPTS = 5;
 
 function generateCaptcha(): { captchaId: string; question: string } {
   const a = Math.floor(Math.random() * 20) + 1;
@@ -98,10 +101,12 @@ function getRequestIp(ctx: { req: { ip?: string; socket: { remoteAddress?: strin
 }
 
 function parseEmailWhitelist(value?: string | null) {
-  return String(value || "")
+  const items = String(value || "")
     .split(/[,，]/)
-    .map((item) => item.trim().toLowerCase().replace(/^@/, ""))
-    .filter(Boolean);
+    .map((item) => item.trim().toLowerCase().replace(/^@+/, "").replace(/\.+$/, ""))
+    .filter(Boolean)
+    .filter((item) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(item));
+  return [...new Set(items)];
 }
 
 function ensureAllowedEmail(email: string, config: Awaited<ReturnType<typeof getEmailConfig>>) {
@@ -133,6 +138,10 @@ function verifyEmailCode(email: string, code?: string) {
   }
   const ok = entry.code === String(code || "").trim();
   if (ok) emailCodeStore.delete(key);
+  else {
+    entry.attempts += 1;
+    if (entry.attempts >= EMAIL_CODE_MAX_ATTEMPTS) emailCodeStore.delete(key);
+  }
   return ok;
 }
 
@@ -161,9 +170,13 @@ export const authRouter = router({
         return { skipped: true };
       }
       const email = ensureAllowedEmail(input.email, config);
+      const existing = emailCodeStore.get(email);
+      if (existing?.lastSentAt && Date.now() - existing.lastSentAt < EMAIL_CODE_COOLDOWN_MS) {
+        throw new Error("验证码发送过于频繁，请稍后再试");
+      }
       const code = generateEmailCode();
-      emailCodeStore.set(email, { code, expiresAt: Date.now() + 5 * 60 * 1000 });
       await sendVerificationCode(email, code);
+      emailCodeStore.set(email, { code, expiresAt: Date.now() + EMAIL_CODE_TTL_MS, lastSentAt: Date.now(), attempts: 0 });
       console.info(`[Auth] Verification email sent target=${maskIdentifier(email)} ip=${getRequestIp(ctx)}`);
       return { success: true, expiresInSeconds: 300 };
     }),

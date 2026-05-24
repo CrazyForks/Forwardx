@@ -13,7 +13,7 @@ import {
   userSubscriptions, InsertUserSubscription,
   users,
 } from "../../drizzle/schema";
-import { executeRaw, getDb, insertAndGetId, nowDate } from "../dbRuntime";
+import { executeRaw, getDatabaseKind, getDb, getPool, getSqlite, insertAndGetId, nowDate } from "../dbRuntime";
 import { getHostById } from "./hostRepository";
 import { getTunnelById } from "./tunnelRepository";
 import { getUserById, resetUserTraffic, updateUserTrafficSettings } from "./userRepository";
@@ -369,6 +369,73 @@ export async function getUserBalance(userId: number) {
   return Number((user as any)?.balanceCents || 0);
 }
 
+async function addUserBalanceMysql(userId: number, amountCents: number, meta: Omit<InsertBalanceTransaction, "userId" | "amountCents" | "balanceAfterCents">) {
+  const pool = getPool();
+  if (!pool) throw new Error("Database not available");
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.execute<any[]>("SELECT balanceCents FROM users WHERE id = ? FOR UPDATE", [userId]);
+    const row = rows?.[0];
+    if (!row) throw new Error("用户不存在");
+    const current = Number(row.balanceCents || 0);
+    const next = current + Math.round(amountCents);
+    if (next < 0) throw new Error("余额不足");
+    const now = Math.floor(Date.now() / 1000);
+    await conn.execute("UPDATE users SET balanceCents = ?, updatedAt = ? WHERE id = ?", [next, now, userId]);
+    await conn.execute(
+      "INSERT INTO balance_transactions (userId, type, amountCents, balanceAfterCents, description, operatorUserId, paymentOrderNo, redemptionCodeId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        userId,
+        meta.type,
+        Math.round(amountCents),
+        next,
+        meta.description ?? null,
+        meta.operatorUserId ?? null,
+        meta.paymentOrderNo ?? null,
+        meta.redemptionCodeId ?? null,
+        now,
+      ],
+    );
+    await conn.commit();
+    return { balanceCents: next };
+  } catch (error) {
+    await conn.rollback().catch(() => undefined);
+    throw error;
+  } finally {
+    conn.release();
+  }
+}
+
+function addUserBalanceSqlite(userId: number, amountCents: number, meta: Omit<InsertBalanceTransaction, "userId" | "amountCents" | "balanceAfterCents">) {
+  const sqlite = getSqlite();
+  if (!sqlite) throw new Error("Database not available");
+  const tx = sqlite.transaction(() => {
+    const user = sqlite.prepare("SELECT balanceCents FROM users WHERE id = ?").get(userId) as any;
+    if (!user) throw new Error("用户不存在");
+    const current = Number(user.balanceCents || 0);
+    const next = current + Math.round(amountCents);
+    if (next < 0) throw new Error("余额不足");
+    const now = Math.floor(Date.now() / 1000);
+    sqlite.prepare("UPDATE users SET balanceCents = ?, updatedAt = ? WHERE id = ?").run(next, now, userId);
+    sqlite.prepare(
+      "INSERT INTO balance_transactions (userId, type, amountCents, balanceAfterCents, description, operatorUserId, paymentOrderNo, redemptionCodeId, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    ).run(
+      userId,
+      meta.type,
+      Math.round(amountCents),
+      next,
+      meta.description ?? null,
+      meta.operatorUserId ?? null,
+      meta.paymentOrderNo ?? null,
+      meta.redemptionCodeId ?? null,
+      now,
+    );
+    return { balanceCents: next };
+  });
+  return tx();
+}
+
 export async function listBalanceTransactions(userId?: number, limit = 100) {
   const db = await getDb();
   if (!db) return [];
@@ -406,6 +473,7 @@ function billingTime(value: unknown) {
 function paymentStatusLabel(status: string) {
   if (status === "pending") return "待支付";
   if (status === "paid") return "已支付";
+  if (status === "processing") return "处理中";
   if (status === "completed") return "已完成";
   if (status === "expired") return "已过期";
   if (status === "cancelled") return "已取消";
@@ -531,19 +599,10 @@ export async function addUserBalance(userId: number, amountCents: number, meta: 
   const db = await getDb();
   if (!db) throw new Error("Database not available");
   if (!Number.isFinite(amountCents) || amountCents === 0) throw new Error("閲戦鏃犳晥");
-  const user = await getUserById(userId);
-  if (!user) throw new Error("用户不存在");
-  const current = Number((user as any).balanceCents || 0);
-  const next = current + Math.round(amountCents);
-  if (next < 0) throw new Error("浣欓涓嶈冻");
-  await db.update(users).set({ balanceCents: next, updatedAt: nowDate() } as any).where(eq(users.id, userId));
-  await db.insert(balanceTransactions).values({
-    ...meta,
-    userId,
-    amountCents: Math.round(amountCents),
-    balanceAfterCents: next,
-  } as any);
-  return { balanceCents: next };
+  const kind = getDatabaseKind();
+  if (kind === "mysql") return addUserBalanceMysql(userId, amountCents, meta);
+  if (kind === "sqlite") return addUserBalanceSqlite(userId, amountCents, meta);
+  throw new Error("Database not available");
 }
 
 export async function purchasePlanWithBalance(userId: number, planId: number, discountCodeId?: number | null) {
@@ -808,10 +867,38 @@ export async function updatePaymentOrder(outTradeNo: string, data: Partial<Inser
   return getPaymentOrderByOutTradeNo(outTradeNo);
 }
 
+function affectedRows(result: any) {
+  return Number(result?.affectedRows ?? result?.changes ?? 0);
+}
+
+export async function claimPaidPaymentOrder(outTradeNo: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const now = Math.floor(Date.now() / 1000);
+  const result = await executeRaw(
+    "UPDATE payment_orders SET status = ?, updatedAt = ? WHERE outTradeNo = ? AND status = ?",
+    ["processing", now, outTradeNo, "paid"],
+  );
+  if (affectedRows(result) <= 0) return undefined;
+  return getPaymentOrderByOutTradeNo(outTradeNo);
+}
+
+export async function resetStaleProcessingPaymentOrder(outTradeNo: string, before: Date) {
+  const db = await getDb();
+  if (!db) return false;
+  const now = Math.floor(Date.now() / 1000);
+  const cutoff = Math.floor(before.getTime() / 1000);
+  const result = await executeRaw(
+    "UPDATE payment_orders SET status = ?, updatedAt = ? WHERE outTradeNo = ? AND status = ? AND updatedAt < ?",
+    ["paid", now, outTradeNo, "processing", cutoff],
+  );
+  return affectedRows(result) > 0;
+}
+
 export async function markPaymentOrderPaid(outTradeNo: string, data: { tradeNo?: string | null; rawNotify?: string | null; amountCents?: number; currency?: string }) {
   const existing = await getPaymentOrderByOutTradeNo(outTradeNo);
   if (!existing) return undefined;
-  if (existing.status === "paid" || existing.status === "completed") {
+  if (existing.status === "paid" || existing.status === "processing" || existing.status === "completed") {
     return updatePaymentOrder(outTradeNo, {
       tradeNo: data.tradeNo || existing.tradeNo,
       rawNotify: data.rawNotify || existing.rawNotify,
@@ -821,10 +908,23 @@ export async function markPaymentOrderPaid(outTradeNo: string, data: { tradeNo?:
     status: "paid",
     tradeNo: data.tradeNo || existing.tradeNo,
     rawNotify: data.rawNotify || existing.rawNotify,
-    amountCents: data.amountCents || existing.amountCents,
     currency: data.currency || existing.currency,
     paidAt: nowDate(),
   } as Partial<InsertPaymentOrder>);
+}
+
+export async function getBalanceTransactionByPaymentOrderNo(paymentOrderNo: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(balanceTransactions).where(eq(balanceTransactions.paymentOrderNo, paymentOrderNo)).limit(1);
+  return rows[0];
+}
+
+export async function getUserSubscriptionByPaymentOrderNo(paymentOrderNo: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(userSubscriptions).where(eq(userSubscriptions.paymentOrderNo, paymentOrderNo)).limit(1);
+  return rows[0];
 }
 
 export async function getPaymentOrderStats() {
@@ -834,8 +934,8 @@ export async function getPaymentOrderStats() {
     .select({
       totalOrders: sql<number>`COUNT(*)`,
       pendingOrders: sql<number>`SUM(CASE WHEN ${paymentOrders.status} = 'pending' THEN 1 ELSE 0 END)`,
-      paidOrders: sql<number>`SUM(CASE WHEN ${paymentOrders.status} IN ('paid', 'completed') THEN 1 ELSE 0 END)`,
-      paidAmountCents: sql<number>`COALESCE(SUM(CASE WHEN ${paymentOrders.status} IN ('paid', 'completed') THEN ${paymentOrders.amountCents} ELSE 0 END), 0)`,
+      paidOrders: sql<number>`SUM(CASE WHEN ${paymentOrders.status} IN ('paid', 'processing', 'completed') THEN 1 ELSE 0 END)`,
+      paidAmountCents: sql<number>`COALESCE(SUM(CASE WHEN ${paymentOrders.status} IN ('paid', 'processing', 'completed') THEN ${paymentOrders.amountCents} ELSE 0 END), 0)`,
     })
     .from(paymentOrders);
   const row = rows[0];

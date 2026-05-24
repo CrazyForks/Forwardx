@@ -484,6 +484,11 @@ function stripeAmountForCurrency(amountCents: number, currency: string) {
   return zeroDecimalCurrencies.has(normalized) ? Math.round(amountCents / 100) : amountCents;
 }
 
+function stripeAmountToCents(amount: number, currency: string) {
+  const normalized = currency.toLowerCase();
+  return zeroDecimalCurrencies.has(normalized) ? Math.round(amount * 100) : Math.round(amount);
+}
+
 async function createStripeCheckoutOrder(config: PaymentConfig, order: {
   outTradeNo: string;
   subject: string;
@@ -682,10 +687,56 @@ async function expireStalePendingOrders() {
   }
 }
 
+type PaidNotification = {
+  provider: string;
+  tradeNo?: string | null;
+  amountCents: number;
+  currency: string;
+  rawNotify: string;
+};
+
+const PROCESSING_STALE_MS = 10 * 60 * 1000;
+
+function sameCurrency(a?: string | null, b?: string | null) {
+  return String(a || "").trim().toUpperCase() === String(b || "").trim().toUpperCase();
+}
+
+function assertPaidNotificationMatchesOrder(order: any, notification: PaidNotification) {
+  const expectedAmount = Number(order.amountCents || 0);
+  if (!Number.isFinite(notification.amountCents) || notification.amountCents <= 0) {
+    throw new Error(`invalid paid amount order=${order.outTradeNo}`);
+  }
+  if (notification.amountCents !== expectedAmount) {
+    throw new Error(`paid amount mismatch order=${order.outTradeNo} expected=${expectedAmount} got=${notification.amountCents}`);
+  }
+  if (!sameCurrency(order.currency, notification.currency)) {
+    throw new Error(`paid currency mismatch order=${order.outTradeNo} expected=${order.currency} got=${notification.currency}`);
+  }
+  if (order.provider !== notification.provider) {
+    throw new Error(`paid provider mismatch order=${order.outTradeNo} expected=${order.provider} got=${notification.provider}`);
+  }
+}
+
 async function finalizePaidOrder(outTradeNo: string) {
-  const order = await db.getPaymentOrderByOutTradeNo(outTradeNo);
-  if (!order || order.status === "completed") return;
+  let order = await db.claimPaidPaymentOrder(outTradeNo);
+  if (!order) {
+    const existing = await db.getPaymentOrderByOutTradeNo(outTradeNo);
+    if (!existing || existing.status === "completed") return;
+    if (existing.status !== "processing") return;
+    const staleBefore = new Date(Date.now() - PROCESSING_STALE_MS);
+    const reset = await db.resetStaleProcessingPaymentOrder(outTradeNo, staleBefore);
+    if (!reset) return;
+    order = await db.claimPaidPaymentOrder(outTradeNo);
+    if (!order) return;
+  }
+
+  try {
   if (order.planId && !order.subscriptionId) {
+    const existingSubscription = await db.getUserSubscriptionByPaymentOrderNo(outTradeNo);
+    if (existingSubscription) {
+      await db.updatePaymentOrder(outTradeNo, { subscriptionId: existingSubscription.id, status: "completed" } as any);
+      return;
+    }
     const result = await db.applySubscriptionToUser(order.userId, order.planId, "payment", outTradeNo);
     if ((order as any).discountCodeId) await db.consumeDiscountCode(Number((order as any).discountCodeId));
     await db.updatePaymentOrder(outTradeNo, { subscriptionId: result.subscriptionId, status: "completed" } as any);
@@ -693,6 +744,11 @@ async function finalizePaidOrder(outTradeNo: string) {
     return;
   }
   if ((order as any).orderType === "balance") {
+    const existingTransaction = await db.getBalanceTransactionByPaymentOrderNo(outTradeNo);
+    if (existingTransaction) {
+      await db.updatePaymentOrder(outTradeNo, { status: "completed" } as any);
+      return;
+    }
     await db.addUserBalance(order.userId, Number(order.amountCents || 0), {
       type: "payment",
       description: `在线充值：${outTradeNo}`,
@@ -703,6 +759,55 @@ async function finalizePaidOrder(outTradeNo: string) {
     return;
   }
   await db.updatePaymentOrder(outTradeNo, { status: "completed" } as any);
+  } catch (error) {
+    await db.updatePaymentOrder(outTradeNo, { status: "paid" } as any);
+    throw error;
+  }
+}
+
+async function processPaidNotification(outTradeNo: string, notification: PaidNotification) {
+  const order = await db.getPaymentOrderByOutTradeNo(outTradeNo);
+  if (!order) {
+    appendPanelLog("warn", `[Payment] ${notification.provider} notify ignored unknown order=${outTradeNo}`);
+    return { ignored: true, reason: "unknown_order" as const };
+  }
+  if (order.status === "processing") {
+    await finalizePaidOrder(outTradeNo);
+    const latest = await db.getPaymentOrderByOutTradeNo(outTradeNo);
+    if (latest?.status === "completed") {
+      await db.updatePaymentOrder(outTradeNo, {
+        tradeNo: notification.tradeNo || latest.tradeNo,
+        rawNotify: notification.rawNotify,
+      } as any);
+    }
+    return { ignored: true, reason: "processing" as const };
+  }
+  if (order.status === "completed") {
+    await db.updatePaymentOrder(outTradeNo, {
+      tradeNo: notification.tradeNo || order.tradeNo,
+      rawNotify: notification.rawNotify,
+    } as any);
+    return { ignored: true, reason: "completed" as const };
+  }
+  try {
+    assertPaidNotificationMatchesOrder(order, notification);
+  } catch (error: any) {
+    await db.updatePaymentOrder(outTradeNo, {
+      status: "failed",
+      tradeNo: notification.tradeNo || order.tradeNo,
+      rawNotify: notification.rawNotify,
+    } as any);
+    appendPanelLog("error", `[Payment] ${notification.provider} notify rejected: ${error?.message || error}`);
+    return { ignored: true, reason: "mismatch" as const };
+  }
+  await db.markPaymentOrderPaid(outTradeNo, {
+    tradeNo: notification.tradeNo,
+    amountCents: notification.amountCents,
+    currency: notification.currency,
+    rawNotify: notification.rawNotify,
+  });
+  await finalizePaidOrder(outTradeNo);
+  return { ignored: false };
 }
 
 export const paymentRouter = router({
@@ -891,13 +996,13 @@ paymentCallbackRouter.post("/api/payment/webhook/easypay", express.raw({ type: "
     }
     const outTradeNo = params.out_trade_no;
     if (!outTradeNo) throw new Error("missing out_trade_no");
-    await db.markPaymentOrderPaid(outTradeNo, {
+    await processPaidNotification(outTradeNo, {
+      provider: "easypay",
       tradeNo: params.trade_no,
       amountCents: parseAmountCents(params.money),
       currency: "CNY",
       rawNotify: raw,
     });
-    await finalizePaidOrder(outTradeNo);
     appendPanelLog("info", `[Payment] EasyPay paid outTradeNo=${outTradeNo}`);
     res.send("success");
   } catch (error: any) {
@@ -927,13 +1032,13 @@ paymentCallbackRouter.post("/api/payment/webhook/alipay", express.raw({ type: "*
     }
     const outTradeNo = params.out_trade_no;
     if (!outTradeNo) throw new Error("missing out_trade_no");
-    await db.markPaymentOrderPaid(outTradeNo, {
+    await processPaidNotification(outTradeNo, {
+      provider: "alipay",
       tradeNo: params.trade_no,
       amountCents: parseAmountCents(params.total_amount),
       currency: "CNY",
       rawNotify: raw,
     });
-    await finalizePaidOrder(outTradeNo);
     appendPanelLog("info", `[Payment] Alipay paid outTradeNo=${outTradeNo}`);
     res.send("success");
   } catch (error: any) {
@@ -973,13 +1078,13 @@ paymentCallbackRouter.post("/api/payment/webhook/wxpay", express.raw({ type: "*/
     }
     const outTradeNo = transaction.out_trade_no;
     if (!outTradeNo) throw new Error("missing out_trade_no");
-    await db.markPaymentOrderPaid(outTradeNo, {
+    await processPaidNotification(outTradeNo, {
+      provider: "wxpay",
       tradeNo: transaction.transaction_id,
       amountCents: Number(transaction.amount?.total || 0),
       currency: transaction.amount?.currency || "CNY",
       rawNotify: raw,
     });
-    await finalizePaidOrder(outTradeNo);
     appendPanelLog("info", `[Payment] WeChat Pay paid outTradeNo=${outTradeNo}`);
     res.status(204).end();
   } catch (error: any) {
@@ -1006,13 +1111,14 @@ paymentCallbackRouter.post("/api/payment/webhook/stripe", express.raw({ type: "*
     const object = event?.data?.object || {};
     const outTradeNo = object?.metadata?.outTradeNo || object?.metadata?.orderId;
     if (event.type === "checkout.session.completed" && outTradeNo && object.payment_status === "paid") {
-      await db.markPaymentOrderPaid(outTradeNo, {
+      const currency = String(object.currency || config.stripe.currency).toUpperCase();
+      await processPaidNotification(outTradeNo, {
+        provider: "stripe",
         tradeNo: object.payment_intent || object.id,
-        amountCents: Number(object.amount_total || 0),
-        currency: String(object.currency || config.stripe.currency).toUpperCase(),
+        amountCents: stripeAmountToCents(Number(object.amount_total || 0), currency),
+        currency,
         rawNotify: raw,
       });
-      await finalizePaidOrder(outTradeNo);
       appendPanelLog("info", `[Payment] Stripe paid outTradeNo=${outTradeNo}`);
     } else if (event.type === "checkout.session.expired" && outTradeNo) {
       await db.updatePaymentOrder(outTradeNo, { status: "expired", rawNotify: raw } as any);

@@ -810,23 +810,6 @@ function TunnelsContent() {
                   <span className="mt-0.5 block text-xs text-muted-foreground">指定入口 Agent 可访问的出口 IP</span>
                 </button>
               </div>
-              {form.networkType === "private" && (
-                <div className="space-y-2">
-                  <Input
-                    list="tunnel-connect-host-options"
-                    value={form.connectHost}
-                    onChange={(e) => setForm({ ...form, connectHost: e.target.value })}
-                    placeholder="例如 10.0.0.8 或 fd00::8"
-                    aria-label="内网隧道连接 IP"
-                  />
-                  <datalist id="tunnel-connect-host-options">
-                    {connectHostOptions.map((ip) => <option key={ip} value={ip} />)}
-                  </datalist>
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    可选择出口 Agent 已记录的地址，也可以直接输入自定义 IPv4 / IPv6。
-                  </p>
-                </div>
-              )}
             </div>
             <div className="space-y-2">
               <Label>隧道类型</Label>
@@ -933,6 +916,24 @@ function TunnelsContent() {
               </div>
               )}
               <div className="space-y-2">
+                {form.networkType === "private" && (
+                  <div className="space-y-2">
+                    <Label>内网出口 IP</Label>
+                    <Input
+                      list="tunnel-connect-host-options"
+                      value={form.connectHost}
+                      onChange={(e) => setForm({ ...form, connectHost: e.target.value })}
+                      placeholder="例如 10.0.0.8 或 fd00::8"
+                      aria-label="内网隧道连接 IP"
+                    />
+                    <datalist id="tunnel-connect-host-options">
+                      {connectHostOptions.map((ip) => <option key={ip} value={ip} />)}
+                    </datalist>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      可选择出口 Agent 已记录的地址，也可以直接输入自定义 IPv4 / IPv6。
+                    </p>
+                  </div>
+                )}
                 <Label>出口监听端口</Label>
                 <Input type="number" min={0} max={65535} step={1} value={form.listenPort || ""} onChange={(e) => setForm({ ...form, listenPort: Number(e.target.value) || 0 })} placeholder="自动分配" />
                 <p className="text-xs text-muted-foreground">可留空，面板会按出口 Agent 的端口范围自动选择高位可用端口。</p>

@@ -97,6 +97,24 @@ agentRouter.post("/api/agent/rule-status", async (req: Request, res: Response) =
       return;
     }
 
+    const rule = await db.getForwardRuleById(ruleId);
+    if (!rule) {
+      res.status(404).json({ error: "rule not found" });
+      return;
+    }
+    let allowed = Number((rule as any).hostId) === Number(host.id);
+    if (!allowed && (rule as any).tunnelId) {
+      const tunnel = await db.getTunnelById(Number((rule as any).tunnelId));
+      allowed = !!tunnel && (
+        Number((tunnel as any).entryHostId) === Number(host.id)
+        || Number((tunnel as any).exitHostId) === Number(host.id)
+      );
+    }
+    if (!allowed) {
+      res.status(403).json({ error: "forbidden" });
+      return;
+    }
+
     await db.updateRuleRunningStatus(ruleId, !!isRunning);
     appendPanelLog(
       !!isRunning ? "info" : "warn",

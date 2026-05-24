@@ -167,12 +167,13 @@ function statusBadge(status: string) {
   const text: Record<string, string> = {
     pending: "待支付",
     paid: "已支付",
+    processing: "处理中",
     completed: "已完成",
     expired: "已过期",
     cancelled: "已取消",
     failed: "失败",
   };
-  const tone = status === "paid" || status === "completed"
+  const tone = status === "paid" || status === "processing" || status === "completed"
     ? "border-emerald-200 bg-emerald-50 text-emerald-700"
     : status === "pending"
       ? "border-amber-200 bg-amber-50 text-amber-700"
