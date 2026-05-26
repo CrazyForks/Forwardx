@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.3.06] - 2026-05-26
+
+### Added
+
+- Added Capacitor-based Android client packaging with GitHub Actions APK builds and release upload.
+- Added Android mobile login with saved panel URL, username, password, and mobile token authentication.
+- Added Android traffic/package reminder notifications, APK update checks, and unified web/Android app icons.
+
+### Changed
+
+- Android clients now skip the public homepage and enter the backend dashboard after login.
+- Switched the project license from MIT to AGPL-3.0-only.
+- Bumped panel version to 2.3.06. Agent version remains 2.2.49.
+
 ## [2.3.05] - 2026-05-25
 
 ### Added
